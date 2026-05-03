@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 *$py.class
+config.py
 
 .pytest_cache/
 .mypy_cache/

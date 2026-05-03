@@ -46,6 +46,8 @@ def build_attack_adapter(
     adapter_cls = ATTACK_ADAPTERS[attack_name]
     if attack_name == "label_flipping_untargeted":
         return adapter_cls(num_classes=dataset_info["num_classes"], params=params)
+    if attack_name == "label_flipping_targeted":
+        return adapter_cls(num_classes=dataset_info["num_classes"], params=params)
     if attack_name in {"badnets", "dba", "edge_case", "semantic_backdoor"}:
         return adapter_cls(dataset_name=dataset_name, params=params)
     return adapter_cls(params=params)

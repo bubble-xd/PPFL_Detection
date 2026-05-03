@@ -311,10 +311,25 @@ class LabelFlippingTargetedAdapter(BaseAttackAdapter):
     attack_mode = "targeted"
     is_data_poisoning = True
 
-    def __init__(self, params: Dict[str, object]) -> None:
+    def __init__(self, params: Dict[str, object], num_classes: int | None = None) -> None:
         self.source_class = int(params.get("source_class", 1))
         self.target_class = int(params.get("target_class", 0))
         self.poison_ratio = float(params.get("poison_ratio", 1.0))
+        self.num_classes = int(num_classes) if num_classes is not None else None
+        if self.num_classes is not None:
+            # targeted label flipping 的 source/target 必须属于当前数据集；
+            # 否则会出现“没有任何样本被翻转、ASR 为 nan，但实验继续跑”的静默错误。
+            for field_name, class_id in (
+                ("source_class", self.source_class),
+                ("target_class", self.target_class),
+            ):
+                if not 0 <= class_id < self.num_classes:
+                    raise ValueError(
+                        f"{field_name}={class_id} is outside valid class range "
+                        f"[0, {self.num_classes - 1}] for label_flipping_targeted."
+                    )
+        if self.source_class == self.target_class:
+            raise ValueError("source_class and target_class must be different for label_flipping_targeted.")
 
     def poison_local_dataset(self, dataset, client_id: int, malicious_ids: List[int]):
         images, labels = _resolve_dataset_tensors(dataset)
