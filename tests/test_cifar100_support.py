@@ -1,15 +1,29 @@
 from __future__ import annotations
 
+import inspect
 import unittest
 
 from attacks.targeted.badnets import BadNetsAttack
 from attacks.targeted.dba import DBAAttack
 from config import Config
-from data.data_loader import _get_dataset_info
+from data.data_loader import _get_dataset_info, build_federated_datasets
 from models import build_model
 
 
 class Cifar100SupportTestCase(unittest.TestCase):
+    def test_build_federated_datasets_accepts_runtime_loader_options(self) -> None:
+        signature = inspect.signature(build_federated_datasets)
+
+        # benchmark 调度器会把运行时 DataLoader 选项透传进来；
+        # 这里固定接口契约，避免函数签名回退后在主流程启动时才报 TypeError。
+        for parameter_name in (
+            "num_workers",
+            "pin_memory",
+            "persistent_workers",
+            "prefetch_factor",
+        ):
+            self.assertIn(parameter_name, signature.parameters)
+
     def test_cifar100_dataset_info_matches_resnet34_requirements(self) -> None:
         info = _get_dataset_info("cifar100")
 
