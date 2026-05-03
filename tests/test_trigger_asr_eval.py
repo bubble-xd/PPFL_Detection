@@ -7,6 +7,7 @@ import torch
 from torch.utils.data import TensorDataset
 
 from attacks.adapters import LabelFlippingTargetedAdapter
+from attacks.registry import build_attack_adapter
 from attacks.targeted.badnets import BadNetsAttack
 from attacks.targeted.dba import DBAAttack
 from attacks.targeted.edge_case import ARDISDataset, EDGE_CASE_DATA_DIR
@@ -79,6 +80,30 @@ class TriggerAsrEvalTestCase(unittest.TestCase):
         # Label flipping 没有触发器，ASR 应评估 source 类被预测成 target 类的比例。
         self.assertTrue(torch.equal(asr_images, images[labels == 4]))
         self.assertTrue(torch.equal(asr_labels, torch.full_like(asr_labels, 9)))
+
+    def test_label_flipping_targeted_rejects_classes_outside_dataset(self) -> None:
+        with self.assertRaisesRegex(ValueError, "source_class=42"):
+            LabelFlippingTargetedAdapter(
+                {"source_class": 42, "target_class": 88, "poison_ratio": 1.0},
+                num_classes=10,
+            )
+
+    def test_label_flipping_targeted_uses_dataset_override(self) -> None:
+        adapter = build_attack_adapter(
+            attack_config={
+                "name": "label_flipping_targeted",
+                "params": {"source_class": 42, "target_class": 88, "poison_ratio": 1.0},
+                "params_by_dataset": {
+                    "cifar10": {"source_class": 3, "target_class": 5},
+                },
+            },
+            dataset_name="cifar10",
+            dataset_info={"num_classes": 10},
+        )
+
+        # CIFAR10 运行时应覆盖掉 CIFAR100 的 42->88，避免攻击配置静默失效。
+        self.assertEqual(adapter.source_class, 3)
+        self.assertEqual(adapter.target_class, 5)
 
     @unittest.skipUnless(_has_ardis_files(), "ARDIS edge-case data files are missing.")
     def test_edge_case_ardis_asr_eval_uses_held_out_source_class(self) -> None:
