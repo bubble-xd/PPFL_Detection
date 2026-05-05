@@ -142,6 +142,101 @@ class LazyStateDeltaSequence(Sequence[Dict[str, Tensor]]):
         for state_dict in self.state_dicts:
             yield build_state_delta_dict(state_dict, self.global_state_dict)
 
+    def get_float_metadata(self):
+        update_count = len(self.state_dicts)
+        if update_count <= 0:
+            return [], {}, {}
+
+        first_state = self.state_dicts[0]
+        keys = [
+            key
+            for key, value in first_state.items()
+            if torch.is_tensor(value) and value.dtype.is_floating_point
+        ]
+        shapes = {}
+        sizes = {}
+        for key in keys:
+            if key not in self.global_state_dict:
+                raise KeyError(f"global_state_dict 缺少 key: {key}")
+            local_value = first_state[key]
+            global_value = self.global_state_dict[key]
+            if not torch.is_tensor(global_value):
+                raise TypeError(f"global_state_dict['{key}'] 不是 Tensor。")
+            if local_value.shape != global_value.shape:
+                raise ValueError(f"{key} 的 local/global 形状不一致。")
+            shapes[key] = local_value.shape
+            sizes[key] = int(local_value.numel())
+        return keys, shapes, sizes
+
+    def build_update_sum_sumsq(
+        self,
+        device: str | torch.device = "cpu",
+        keys=None,
+        shapes=None,
+    ):
+        update_count = len(self.state_dicts)
+        if update_count <= 0:
+            return {}, {}, {}, {}
+
+        if keys is None or shapes is None:
+            keys, shapes, _ = self.get_float_metadata()
+
+        target_device = torch.device(device)
+        if target_device.type == "cuda" and not torch.cuda.is_available():
+            target_device = torch.device("cpu")
+
+        sums = {
+            key: torch.zeros(shapes[key], dtype=torch.float32, device=target_device)
+            for key in keys
+        }
+        sumsq_values = {
+            key: torch.zeros(shapes[key], dtype=torch.float32, device=target_device)
+            for key in keys
+        }
+        counts = {key: 0 for key in keys}
+        scratch = {
+            key: torch.empty(shapes[key], dtype=torch.float32, device=target_device)
+            for key in keys
+        }
+
+        # FedImp 统计只需要 update 的一阶/二阶和；
+        # 这里按客户端流式累加，避免先构造“全层 delta dict”再二次遍历。
+        for row_index in range(update_count):
+            state_dict = self.state_dicts[row_index]
+            for key in keys:
+                if key not in state_dict:
+                    raise KeyError(f"state_dict 缺少 key: {key}")
+                if key not in self.global_state_dict:
+                    raise KeyError(f"global_state_dict 缺少 key: {key}")
+                local_value = state_dict[key]
+                global_value = self.global_state_dict[key]
+                if not torch.is_tensor(local_value) or not local_value.dtype.is_floating_point:
+                    raise TypeError(f"state_dict['{key}'] 不是浮点 Tensor。")
+                if not torch.is_tensor(global_value):
+                    raise TypeError(f"global_state_dict['{key}'] 不是 Tensor。")
+                if local_value.shape != shapes[key] or global_value.shape != shapes[key]:
+                    raise ValueError(f"{key} 的 local/global 形状不一致。")
+
+                delta = scratch[key]
+                torch.sub(
+                    local_value.detach().to(
+                        device=target_device,
+                        dtype=torch.float32,
+                        non_blocking=target_device.type == "cuda",
+                    ),
+                    global_value.detach().to(
+                        device=target_device,
+                        dtype=torch.float32,
+                        non_blocking=target_device.type == "cuda",
+                    ),
+                    out=delta,
+                )
+                counts[key] += 1
+                sums[key].add_(delta)
+                sumsq_values[key].addcmul_(delta, delta)
+
+        return sums, sumsq_values, counts, dict(shapes)
+
     def build_dense_update_matrix(self, max_numel: int, device: str | torch.device = "cpu"):
         update_count = len(self.state_dicts)
         if update_count <= 0:

@@ -134,6 +134,56 @@ class StateStoreTestCase(unittest.TestCase):
         for key in current_state:
             self.assertTrue(torch.allclose(direct_state[key], cached_state[key]))
 
+    def test_fedimp_streaming_stats_fallback_matches_direct_streaming(self) -> None:
+        global_state = {
+            "layer.weight": torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32),
+            "layer.bias": torch.tensor([0.0], dtype=torch.float32),
+        }
+        benign_states = [
+            {
+                "layer.weight": torch.tensor([1.1, 0.9, 1.2], dtype=torch.float32),
+                "layer.bias": torch.tensor([0.1], dtype=torch.float32),
+            },
+            {
+                "layer.weight": torch.tensor([0.8, 1.2, 0.7], dtype=torch.float32),
+                "layer.bias": torch.tensor([-0.1], dtype=torch.float32),
+            },
+            {
+                "layer.weight": torch.tensor([1.3, 0.7, 1.1], dtype=torch.float32),
+                "layer.bias": torch.tensor([0.2], dtype=torch.float32),
+            },
+        ]
+        current_state = {
+            "layer.weight": torch.tensor([1.4, 0.7, 1.5], dtype=torch.float32),
+            "layer.bias": torch.tensor([0.2], dtype=torch.float32),
+        }
+        lazy_updates = LazyStateDeltaSequence(benign_states, global_state)
+        streaming_stats = build_fedimp_simulated_update_stats(
+            lazy_updates,
+            max_dense_numel=1,
+        )
+
+        # 这里强制走大模型的 sum/sumsq fallback，验证省内存路径不改变攻击结果。
+        self.assertIsNone(streaming_stats.mean_flat)
+        direct_state = fedimp_attack(
+            trained_state_dict=current_state,
+            global_state_dict=global_state,
+            simulated_updates=lazy_updates,
+            fedimp_factor=2.0,
+            top_k_ratio=0.5,
+        )
+        cached_state = fedimp_attack(
+            trained_state_dict=current_state,
+            global_state_dict=global_state,
+            simulated_updates=lazy_updates,
+            simulated_update_stats=streaming_stats,
+            fedimp_factor=2.0,
+            top_k_ratio=0.5,
+        )
+
+        for key in current_state:
+            self.assertTrue(torch.allclose(direct_state[key], cached_state[key]))
+
     def test_cached_alie_stats_match_direct_streaming(self) -> None:
         global_state = {
             "layer.weight": torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32),
