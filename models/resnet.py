@@ -20,8 +20,6 @@ def _build_resnet(
     model = model_builder(weights=None, num_classes=num_classes)
 
     if int(image_size) <= 64:
-        # CIFAR10/CIFAR100 这类小分辨率图像不适合标准 7x7 + stride=2 的大步长 stem，
-        # 这里改成 3x3/stride=1 并去掉 maxpool，避免前几层过早丢失空间信息。
         model.conv1 = nn.Conv2d(
             input_channels,
             64,

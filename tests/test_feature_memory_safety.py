@@ -78,6 +78,44 @@ class FeatureMemorySafetyTestCase(unittest.TestCase):
         self.assertEqual(tuple(first.aggregator_matrix.shape), (3, 3))
         self.assertTrue(torch.allclose(first.aggregator_matrix, second.aggregator_matrix))
 
+    def test_hashed_projection_reuses_projection_plan_cache(self) -> None:
+        local_states = self._build_local_states()
+        builder = FeatureBuilder(
+            model_name="toy",
+            key_layer_map={"toy": ["layer"]},
+            control_layer_map={"toy": ["layer"]},
+            projection_dim=3,
+            projection_seed=456,
+            feature_chunk_size=2,
+            max_dense_feature_bytes=1,
+            max_projection_matrix_bytes=1,
+        )
+
+        # 同一轮布局在后续 round 会重复出现；缓存散列映射可以避免反复生成投影计划。
+        builder.build_feature_set(local_states, "selected_layers_projected")
+        cache_size_after_first_build = len(builder._hash_projection_plan_cache)
+        builder.build_feature_set(local_states, "selected_layers_projected")
+
+        self.assertGreater(cache_size_after_first_build, 0)
+        self.assertEqual(len(builder._hash_projection_plan_cache), cache_size_after_first_build)
+
+    def test_repeated_feature_build_reuses_layout_cache(self) -> None:
+        local_states = self._build_local_states()
+        builder = FeatureBuilder(
+            model_name="toy",
+            key_layer_map={"toy": ["layer"]},
+            control_layer_map={"toy": ["layer"]},
+            projection_dim=2,
+            projection_seed=123,
+        )
+
+        first = builder.build_feature_set(local_states, "selected_layers")
+        cached_layout = builder._feature_layout_cache["selected_layers"]
+        second = builder.build_feature_set(local_states, "selected_layers")
+
+        self.assertIs(builder._feature_layout_cache["selected_layers"], cached_layout)
+        self.assertTrue(torch.allclose(first.aggregator_matrix, second.aggregator_matrix))
+
     def test_selected_layers_balanced_scales_each_prefix_by_sqrt_dim(self) -> None:
         local_states = [
             {
@@ -108,6 +146,107 @@ class FeatureMemorySafetyTestCase(unittest.TestCase):
         )
         self.assertEqual(feature_set.storage_mode, "dense_balanced")
         self.assertTrue(torch.allclose(feature_set.aggregator_matrix, expected))
+
+    def test_balanced_mode_can_add_batch_norm_without_changing_plain_selected_layers(self) -> None:
+        local_states = [
+            {
+                "conv1.weight": torch.tensor([2.0, 4.0, 6.0, 8.0], dtype=torch.float32),
+                "bn1.weight": torch.tensor([10.0, 12.0], dtype=torch.float32),
+                "bn1.bias": torch.tensor([14.0, 16.0], dtype=torch.float32),
+                "bn1.running_mean": torch.tensor([18.0, 20.0], dtype=torch.float32),
+                "bn1.running_var": torch.tensor([22.0, 24.0], dtype=torch.float32),
+                "bn2.weight": torch.tensor([26.0, 28.0], dtype=torch.float32),
+                "bn2.bias": torch.tensor([30.0, 32.0], dtype=torch.float32),
+                "bn2.running_mean": torch.tensor([34.0, 36.0], dtype=torch.float32),
+                "bn2.running_var": torch.tensor([38.0, 40.0], dtype=torch.float32),
+                "fc.weight": torch.tensor([9.0], dtype=torch.float32),
+            },
+            {
+                "conv1.weight": torch.tensor([4.0, 6.0, 8.0, 10.0], dtype=torch.float32),
+                "bn1.weight": torch.tensor([12.0, 14.0], dtype=torch.float32),
+                "bn1.bias": torch.tensor([16.0, 18.0], dtype=torch.float32),
+                "bn1.running_mean": torch.tensor([20.0, 22.0], dtype=torch.float32),
+                "bn1.running_var": torch.tensor([24.0, 26.0], dtype=torch.float32),
+                "bn2.weight": torch.tensor([28.0, 30.0], dtype=torch.float32),
+                "bn2.bias": torch.tensor([32.0, 34.0], dtype=torch.float32),
+                "bn2.running_mean": torch.tensor([36.0, 38.0], dtype=torch.float32),
+                "bn2.running_var": torch.tensor([40.0, 42.0], dtype=torch.float32),
+                "fc.weight": torch.tensor([6.0], dtype=torch.float32),
+            },
+        ]
+        builder = FeatureBuilder(
+            model_name="toy",
+            key_layer_map={"toy": ["conv1", "fc"]},
+            control_layer_map={"toy": ["conv1"]},
+            projection_dim=2,
+            projection_seed=321,
+            include_batch_norm_in_balanced=True,
+        )
+
+        selected_feature_set = builder.build_feature_set(local_states, "selected_layers")
+        balanced_feature_set = builder.build_feature_set(local_states, "selected_layers_balanced")
+
+        expected_selected = torch.tensor(
+            [
+                [2.0, 4.0, 6.0, 8.0, 9.0],
+                [4.0, 6.0, 8.0, 10.0, 6.0],
+            ],
+            dtype=torch.float32,
+        )
+        expected_balanced = torch.tensor(
+            [
+                [
+                    1.0,
+                    2.0,
+                    3.0,
+                    4.0,
+                    10.0 / (8.0**0.5),
+                    12.0 / (8.0**0.5),
+                    14.0 / (8.0**0.5),
+                    16.0 / (8.0**0.5),
+                    18.0 / (8.0**0.5),
+                    20.0 / (8.0**0.5),
+                    22.0 / (8.0**0.5),
+                    24.0 / (8.0**0.5),
+                    26.0 / (8.0**0.5),
+                    28.0 / (8.0**0.5),
+                    30.0 / (8.0**0.5),
+                    32.0 / (8.0**0.5),
+                    34.0 / (8.0**0.5),
+                    36.0 / (8.0**0.5),
+                    38.0 / (8.0**0.5),
+                    40.0 / (8.0**0.5),
+                    9.0,
+                ],
+                [
+                    2.0,
+                    3.0,
+                    4.0,
+                    5.0,
+                    12.0 / (8.0**0.5),
+                    14.0 / (8.0**0.5),
+                    16.0 / (8.0**0.5),
+                    18.0 / (8.0**0.5),
+                    20.0 / (8.0**0.5),
+                    22.0 / (8.0**0.5),
+                    24.0 / (8.0**0.5),
+                    26.0 / (8.0**0.5),
+                    28.0 / (8.0**0.5),
+                    30.0 / (8.0**0.5),
+                    32.0 / (8.0**0.5),
+                    34.0 / (8.0**0.5),
+                    36.0 / (8.0**0.5),
+                    38.0 / (8.0**0.5),
+                    40.0 / (8.0**0.5),
+                    42.0 / (8.0**0.5),
+                    6.0,
+                ],
+            ],
+            dtype=torch.float32,
+        )
+
+        self.assertTrue(torch.allclose(selected_feature_set.aggregator_matrix, expected_selected))
+        self.assertTrue(torch.allclose(balanced_feature_set.aggregator_matrix, expected_balanced))
 
     def test_balanced_projected_dense_path_matches_manual_projection(self) -> None:
         local_states = [

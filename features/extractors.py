@@ -41,10 +41,14 @@ class FeatureBuilder:
         max_projection_matrix_bytes: Optional[int] = None,
         compute_device: str = "cpu",
         max_gpu_feature_bytes: Optional[int] = None,
+        balanced_extra_layer_map: Optional[Dict[str, List[str]]] = None,
+        include_batch_norm_in_balanced: bool = False,
     ) -> None:
         self.model_name = str(model_name).strip().lower()
         self.key_layer_map = key_layer_map
         self.control_layer_map = control_layer_map
+        self.balanced_extra_layer_map = balanced_extra_layer_map or {}
+        self.include_batch_norm_in_balanced = bool(include_batch_norm_in_balanced)
         self.projection_dim = int(projection_dim)
         self.projection_seed = int(projection_seed)
         self.feature_chunk_size = int(feature_chunk_size)
@@ -53,6 +57,14 @@ class FeatureBuilder:
         self.compute_device = self._resolve_compute_device(compute_device)
         self.max_gpu_feature_bytes = max_gpu_feature_bytes
         self._projection_cache: Dict[tuple[int, str], torch.Tensor] = {}
+        self._hash_projection_plan_cache: Dict[
+            tuple[str, int, int, int, str],
+            tuple[torch.Tensor, torch.Tensor],
+        ] = {}
+        self._feature_layout_cache: Dict[
+            str,
+            tuple[List[str], int, Optional[Dict[str, float]]],
+        ] = {}
 
     def _resolve_compute_device(self, compute_device: str) -> torch.device:
         normalized_device = str(compute_device).strip().lower()
@@ -71,6 +83,61 @@ class FeatureBuilder:
         if not prefixes:
             raise KeyError(f"No control layers configured for model: {self.model_name}")
         return list(prefixes)
+
+    def get_balanced_extra_prefixes(self) -> List[str]:
+        prefixes = self.balanced_extra_layer_map.get(self.model_name, [])
+        return list(prefixes)
+
+    def _dedupe_prefixes(self, prefixes: List[str]) -> List[str]:
+        deduped: List[str] = []
+        seen = set()
+        for prefix in prefixes:
+            normalized = str(prefix).strip()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            deduped.append(normalized)
+        return deduped
+
+    def _has_float_key_with_prefix(self, reference_state, prefix: str) -> bool:
+        for key, value in reference_state.items():
+            if not torch.is_tensor(value) or not value.dtype.is_floating_point:
+                continue
+            if key == prefix or key.startswith(prefix + "."):
+                return True
+        return False
+
+    def _infer_all_batch_norm_prefixes(self, reference_state) -> List[str]:
+        inferred_prefixes: List[str] = []
+        for key, value in reference_state.items():
+            if not torch.is_tensor(value) or not value.dtype.is_floating_point:
+                continue
+            if not (key.endswith(".running_mean") or key.endswith(".running_var")):
+                continue
+
+            # BN 层都有 running_mean / running_var；用统计量反推前缀，
+            # 可以覆盖 stem、残差块和 downsample 中所有命名形式的 BN。
+            prefix = key.rsplit(".", 1)[0]
+            if self._has_float_key_with_prefix(reference_state, prefix):
+                inferred_prefixes.append(prefix)
+        return self._dedupe_prefixes(inferred_prefixes)
+
+    def _get_selected_prefixes_for_mode(self, reference_state, feature_mode: str) -> List[str]:
+        selected_prefixes = self.get_selected_prefixes()
+        normalized_mode = str(feature_mode).strip().lower()
+        if normalized_mode not in {
+            "selected_layers_balanced",
+            "selected_layers_balanced_projected",
+        }:
+            return selected_prefixes
+
+        balanced_prefixes = list(selected_prefixes)
+        balanced_prefixes.extend(self.get_balanced_extra_prefixes())
+        if self.include_batch_norm_in_balanced:
+            # balanced 模式下把当前模型的所有 BN 作为独立层块加入；
+            # 后续仍按各自维度做 sqrt(dim) 缩放，避免 BN 的小维度被大卷积淹没。
+            balanced_prefixes.extend(self._infer_all_batch_norm_prefixes(reference_state))
+        return self._dedupe_prefixes(balanced_prefixes)
 
     def _build_raw_matrix(self, local_state_dicts) -> torch.Tensor:
         rows = [flatten_tensor_dict(local_state_dict) for local_state_dict in local_state_dicts]
@@ -152,8 +219,17 @@ class FeatureBuilder:
         if not local_state_dicts:
             raise ValueError("local_state_dicts 不能为空。")
 
-        reference_state = local_state_dicts[0]
         normalized_mode = str(feature_mode).strip().lower()
+        cached_layout = self._feature_layout_cache.get(normalized_mode)
+        if cached_layout is not None:
+            cached_keys, cached_feature_dim, cached_key_scales = cached_layout
+            return (
+                list(cached_keys),
+                int(cached_feature_dim),
+                dict(cached_key_scales) if cached_key_scales is not None else None,
+            )
+
+        reference_state = local_state_dicts[0]
         key_scales: Optional[Dict[str, float]] = None
         if normalized_mode == "raw_full":
             keys = get_float_tensor_keys(reference_state)
@@ -163,16 +239,15 @@ class FeatureBuilder:
             "selected_layers_balanced",
             "selected_layers_balanced_projected",
         }:
-            keys = list(
-                select_tensor_dict_by_prefixes(reference_state, self.get_selected_prefixes()).keys()
-            )
+            prefixes = self._get_selected_prefixes_for_mode(reference_state, normalized_mode)
+            keys = list(select_tensor_dict_by_prefixes(reference_state, prefixes).keys())
             if normalized_mode in {
                 "selected_layers_balanced",
                 "selected_layers_balanced_projected",
             }:
                 key_scales = self._build_key_scale_map_for_prefixes(
                     reference_state=reference_state,
-                    prefixes=self.get_selected_prefixes(),
+                    prefixes=prefixes,
                 )
         elif normalized_mode == "control_layer":
             keys = list(
@@ -184,6 +259,13 @@ class FeatureBuilder:
         if not keys:
             raise ValueError(f"feature_mode={feature_mode} 未匹配到任何浮点参数。")
         feature_dim = int(sum(int(reference_state[key].numel()) for key in keys))
+        # 模型结构在同一轮实验中不变；缓存 key 列表和逐层缩放，
+        # 避免每轮为 LazyStateDeltaSequence 重建完整 reference delta。
+        self._feature_layout_cache[normalized_mode] = (
+            list(keys),
+            feature_dim,
+            dict(key_scales) if key_scales is not None else None,
+        )
         return keys, feature_dim, key_scales
 
     def _estimate_dense_matrix_bytes(
@@ -353,6 +435,36 @@ class FeatureBuilder:
         projection = self._get_projection(selected_matrix.size(1), device=selected_matrix.device)
         return selected_matrix @ projection
 
+    def _get_hash_projection_plan(
+        self,
+        key: str,
+        chunk_start: int,
+        chunk_size: int,
+        output_dim: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        cache_key = (
+            str(key),
+            int(chunk_start),
+            int(chunk_size),
+            int(output_dim),
+            str(device),
+        )
+        if cache_key not in self._hash_projection_plan_cache:
+            bucket_indices, signs = build_hash_projection_plan(
+                chunk_start=chunk_start,
+                chunk_size=chunk_size,
+                output_dim=output_dim,
+                seed=stable_string_seed(key, self.projection_seed),
+            )
+            # 同一模型/特征模式每轮都会重复访问相同 chunk；
+            # 缓存设备侧映射，避免反复生成 bucket/sign 并做 CPU->GPU 拷贝。
+            self._hash_projection_plan_cache[cache_key] = (
+                bucket_indices.to(device=device),
+                signs.to(device=device),
+            )
+        return self._hash_projection_plan_cache[cache_key]
+
     def _build_projected_matrix_hashed(
         self,
         local_state_dicts,
@@ -373,14 +485,13 @@ class FeatureBuilder:
             key_scales=key_scales,
             device=target_device,
         ):
-            bucket_indices, signs = build_hash_projection_plan(
+            bucket_indices, signs = self._get_hash_projection_plan(
+                key=key,
                 chunk_start=start,
                 chunk_size=int(chunk_rows.size(1)),
                 output_dim=output_dim,
-                seed=stable_string_seed(key, self.projection_seed),
+                device=target_device,
             )
-            bucket_indices = bucket_indices.to(device=target_device)
-            signs = signs.to(device=target_device)
             projected.index_add_(1, bucket_indices, chunk_rows * signs.unsqueeze(0))
         return projected
 

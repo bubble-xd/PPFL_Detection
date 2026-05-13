@@ -153,6 +153,7 @@ def _run_single_setting(
     run_type: str,
     train_attack_adapter,
     eval_attack_adapter,
+    asr_loader=None,
 ):
     device = config.get_device()
     runtime_options = _resolve_runtime_options(config, device)
@@ -162,8 +163,11 @@ def _run_single_setting(
 
     global_model = _build_model_from_experiment(config, experiment_cfg, dataset_info)
     global_state = clone_state_dict(global_model.state_dict(), device="cpu")
-    asr_loader = None
-    if eval_attack_adapter is not None and eval_attack_adapter.attack_mode == "targeted":
+    if (
+        asr_loader is None
+        and eval_attack_adapter is not None
+        and eval_attack_adapter.attack_mode == "targeted"
+    ):
         asr_loader = eval_attack_adapter.build_asr_eval_loader(
             clean_test_dataset=data_bundle.test_dataset,
             batch_size=config.BATCH_SIZE,
@@ -693,6 +697,10 @@ def _run_all_experiments_for_active_poison_rate(
                 max_gpu_feature_bytes=int(
                     getattr(config, "SERVER_FEATURE_GPU_MAX_MB", 512) * 1024 * 1024
                 ),
+                balanced_extra_layer_map=getattr(config, "BALANCED_EXTRA_LAYER_MAP", {}),
+                include_batch_norm_in_balanced=bool(
+                    getattr(config, "INCLUDE_BATCH_NORM_IN_BALANCED_FEATURES", False)
+                ),
             )
 
             summary_records: List[Dict[str, object]] = []
@@ -723,6 +731,14 @@ def _run_all_experiments_for_active_poison_rate(
                         f"malicious_clients={malicious_ids}"
                     ),
                 )
+                asr_loader = None
+                if attack_adapter.attack_mode == "targeted":
+                    # ASR 评估集只依赖攻击配置和测试集；
+                    # 同一攻击下所有 method/feature 复用，避免重复构造投毒评估数据。
+                    asr_loader = attack_adapter.build_asr_eval_loader(
+                        clean_test_dataset=data_bundle.test_dataset,
+                        batch_size=config.BATCH_SIZE,
+                    )
 
                 robust_runs = _resolve_robust_method_feature_runs(
                     methods=config.ROBUST_METHODS,
@@ -744,6 +760,7 @@ def _run_all_experiments_for_active_poison_rate(
                         run_type="robust",
                         train_attack_adapter=attack_adapter,
                         eval_attack_adapter=attack_adapter,
+                        asr_loader=asr_loader,
                     )
                     round_logs.extend(robust_logs)
                     _upsert_summary_record(

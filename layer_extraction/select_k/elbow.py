@@ -588,16 +588,24 @@ def plot_combined_auto_k_results(
     path.parent.mkdir(parents=True, exist_ok=True)
     ordered_results = _sort_results_for_figure(results)
 
+    # 组合论文图需要在缩放后仍清晰可读，因此这里统一放大并加粗所有文字与线条。
     style = {
         "font.family": "Liberation Serif",
         "font.serif": ["Liberation Serif", "Times New Roman", "Times"],
-        "font.size": 14.5,
-        "axes.titlesize": 15.5,
-        "axes.labelsize": 14.5,
-        "xtick.labelsize": 13,
-        "ytick.labelsize": 13,
-        "legend.fontsize": 13,
-        "axes.linewidth": 0.8,
+        "font.size": 20,
+        "font.weight": "bold",
+        "axes.titlesize": 23,
+        "axes.labelsize": 21,
+        "axes.labelweight": "bold",
+        "axes.titleweight": "bold",
+        "xtick.labelsize": 18,
+        "ytick.labelsize": 18,
+        "legend.fontsize": 18,
+        "axes.linewidth": 1.6,
+        "xtick.major.width": 1.45,
+        "ytick.major.width": 1.45,
+        "xtick.major.size": 6,
+        "ytick.major.size": 6,
         "pdf.fonttype": 42,
         "ps.fonttype": 42,
     }
@@ -605,17 +613,17 @@ def plot_combined_auto_k_results(
         fig, axes = plt.subplots(
             2,
             3,
-            figsize=(12.4, 7.0),
+            figsize=(17.0, 9.6),
             sharey=True,
             constrained_layout=False,
         )
         fig.subplots_adjust(
-            left=0.095,
+            left=0.075,
             right=0.985,
-            bottom=0.135,
-            top=0.965,
-            wspace=0.24,
-            hspace=0.34,
+            bottom=0.13,
+            top=0.94,
+            wspace=0.25,
+            hspace=0.36,
         )
         flat_axes = list(axes.ravel())
         letters = ["a", "b", "c", "d", "e"]
@@ -628,79 +636,87 @@ def plot_combined_auto_k_results(
             elbow = result.ranked_layers[result.recommended_k - 1]
 
             # 用浅色区域标出最终进入关键层集合的 rank，图中不放长层名以保证论文版可读性。
+            axis.set_facecolor("#fbfcfe")
             axis.axvspan(
                 0.5,
                 result.recommended_k + 0.5,
-                color="#f8e9a1",
-                alpha=0.45,
+                color="#fff1a8",
+                alpha=0.58,
                 linewidth=0,
                 zorder=0,
             )
             axis.plot(
                 ranks,
                 baseline,
-                color="#9ca3af",
-                linewidth=1.15,
+                color="#8b95a5",
+                linewidth=2.35,
                 linestyle=(0, (4, 2)),
                 zorder=1,
             )
             axis.plot(
                 ranks,
                 normalized_scores,
-                color="#1f4e79",
-                linewidth=1.75,
+                color="#174a7c",
+                linewidth=3.1,
                 marker="o",
-                markersize=3.4,
+                markersize=5.6,
                 markerfacecolor="white",
-                markeredgewidth=0.9,
+                markeredgewidth=1.45,
                 zorder=2,
             )
             axis.axvline(
                 result.recommended_k,
-                color="#b91c1c",
-                linewidth=1.25,
+                color="#c62828",
+                linewidth=2.45,
                 linestyle="--",
                 zorder=3,
             )
             axis.scatter(
                 [elbow.rank],
                 [elbow.normalized_score],
-                s=34,
-                color="#b91c1c",
+                s=105,
+                color="#c62828",
                 edgecolor="white",
-                linewidth=0.7,
+                linewidth=1.35,
                 zorder=4,
             )
             axis.text(
                 0.98,
-                0.10,
+                0.09,
                 f"k = {result.recommended_k}",
                 transform=axis.transAxes,
                 ha="right",
                 va="bottom",
-                fontsize=14.5,
-                color="#7f1d1d",
+                fontsize=20,
+                fontweight="bold",
+                color="#8b1414",
                 bbox={
                     "boxstyle": "round,pad=0.22",
                     "facecolor": "white",
-                    "edgecolor": "#e5e7eb",
-                    "linewidth": 0.6,
-                    "alpha": 0.92,
+                    "edgecolor": "#d9dee8",
+                    "linewidth": 1.1,
+                    "alpha": 0.95,
                 },
             )
             axis.set_title(
                 f"({letters[index]}) {_display_model_name(result.model)}",
                 loc="left",
-                pad=4,
-                fontweight="semibold",
+                pad=7,
+                fontweight="bold",
             )
             axis.set_xlim(0.5, max(ranks) + 0.5)
             axis.set_ylim(-0.04, 1.04)
             axis.xaxis.set_major_locator(MaxNLocator(integer=True, nbins=6))
-            axis.grid(axis="y", color="#d1d5db", alpha=0.55, linewidth=0.65)
-            axis.grid(axis="x", color="#e5e7eb", alpha=0.25, linewidth=0.5)
+            axis.grid(axis="y", color="#c9d2df", alpha=0.72, linewidth=0.95)
+            axis.grid(axis="x", color="#dce3ec", alpha=0.45, linewidth=0.75)
             axis.spines["top"].set_visible(False)
             axis.spines["right"].set_visible(False)
+            axis.spines["left"].set_linewidth(1.6)
+            axis.spines["bottom"].set_linewidth(1.6)
+            axis.tick_params(width=1.45, length=6, pad=5)
+            # Matplotlib 的 rcParams 不总是会作用到 tick label，逐个设置保证所有字体都加粗。
+            for tick_label in axis.get_xticklabels() + axis.get_yticklabels():
+                tick_label.set_fontweight("bold")
 
         for axis in flat_axes[len(ordered_results[:5]):5]:
             axis.axis("off")
@@ -711,54 +727,69 @@ def plot_combined_auto_k_results(
             Line2D(
                 [0],
                 [0],
-                color="#1f4e79",
+                color="#174a7c",
                 marker="o",
                 markerfacecolor="white",
-                linewidth=1.75,
-                markersize=4,
+                linewidth=3.1,
+                markersize=6.2,
                 label="Normalized consensus score",
             ),
             Line2D(
                 [0],
                 [0],
-                color="#9ca3af",
+                color="#8b95a5",
                 linestyle=(0, (4, 2)),
-                linewidth=1.15,
+                linewidth=2.35,
                 label="Chord baseline",
             ),
             Line2D(
                 [0],
                 [0],
-                color="#b91c1c",
+                color="#c62828",
                 linestyle="--",
-                linewidth=1.25,
+                linewidth=2.45,
                 label="Selected elbow",
             ),
         ]
-        legend_axis.legend(
+        legend = legend_axis.legend(
             handles=legend_handles,
             loc="upper left",
             frameon=False,
             borderaxespad=0.0,
+            handlelength=2.5,
+            prop={"size": 20, "weight": "bold"},
         )
+        for legend_text in legend.get_texts():
+            legend_text.set_fontweight("bold")
         summary_lines = [
-            f"{_display_model_name(result.model)}: k={result.recommended_k}"
+            f"{_display_model_name(result.model)}: k = {result.recommended_k}"
             for result in ordered_results[:5]
         ]
         legend_axis.text(
             0.0,
-            0.56,
+            0.50,
             "Selected budgets\n" + "\n".join(summary_lines),
             ha="left",
             va="top",
-            fontsize=13.3,
-            linespacing=1.55,
+            fontsize=20,
+            fontweight="bold",
+            linespacing=1.45,
         )
 
-        fig.supxlabel("Layer rank sorted by consensus score", y=0.055, fontsize=15)
-        fig.supylabel("Normalized consensus score", x=0.035, fontsize=15)
+        fig.supxlabel(
+            "Layer rank sorted by consensus score",
+            y=0.052,
+            fontsize=22,
+            fontweight="bold",
+        )
+        fig.supylabel(
+            "Normalized consensus score",
+            x=0.025,
+            fontsize=22,
+            fontweight="bold",
+        )
         if title:
-            fig.suptitle(title, y=1.01, fontsize=15.5, fontweight="semibold")
+            fig.suptitle(title, y=1.01, fontsize=23, fontweight="bold")
         fig.savefig(path, format="pdf", bbox_inches="tight")
         plt.close(fig)
 

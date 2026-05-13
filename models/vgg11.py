@@ -33,6 +33,4 @@ def vgg11(
         )
         _reset_conv_weights(model.features[0])
 
-    # 这里保留标准 VGG11 的大分类头，
-    # 让模型总参数量维持在约 1.29e8，适合做你要的“大模型 + CIFAR10”实验。
     return model
